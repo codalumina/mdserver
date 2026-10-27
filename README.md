@@ -1,4 +1,4 @@
-# MDServer: The Headless REST API Engine for MetaTrader 5
+# MDServer: The Headless REST API Engine for MetaTrader&nbsp;5
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/release/python-31011/)
@@ -70,44 +70,42 @@ MDServer operates on a **Zero-Trust security model**. It has no default password
 
 ```mermaid
 flowchart LR
-    classDef boundary fill:transparent,stroke:#808080,stroke-width:2px,stroke-dasharray: 4 4
-    classDef core fill:#595959,stroke:#333333,stroke-width:2px,color:#ffffff
-    classDef cli fill:#1e293b,stroke:#94a3b8,stroke-width:2px,color:#ffffff
-    classDef client fill:transparent,stroke:#808080,stroke-width:2px
+    classDef boundary fill:transparent,stroke:#737373,stroke-width:2px,stroke-dasharray: 4 4
+    classDef component fill:transparent,stroke:#8b8b8b,stroke-width:2px
+    classDef core fill:#525252,stroke:#404040,stroke-width:2px,color:#ffffff
 
     subgraph Client [Client Environment]
         direction TB
-        C1(Jupyter / Pandas / ML Pipeline):::client
-        C2(Custom Trading Algo):::client
-        C3(MarketDash Pro):::client
+        C1(Jupyter / ML Pipelines):::component
+        C2(Custom Trading Algos):::component
+        C3(MarketDash Pro):::component
     end
 
-    subgraph Server ["Linux Host (Local or Remote VPS)"]
+    subgraph Server [Linux Host or VPS]
         direction TB
-        CLI[mdserver CLI Tool]:::cli
+        CLI[mdserver CLI Tool]:::core
+        WINE(((WINE 10 Emulation))):::boundary
         
         subgraph MDServer [MDServer Sandbox]
             direction TB
-            API(FastAPI / Uvicorn):::core
-            Bridge(MetaTrader5 Python Bridge):::core
-            MT5(MT5 Terminal GUI):::core
+            API(FastAPI / Uvicorn):::component
+            Bridge(MT5 Python Bridge):::component
+            MT5(MT5 Terminal GUI):::component
             
             API <-->|Local Memory| Bridge
             Bridge <-->|IPC| MT5
         end
-        WINE(((WINE 10 Emulation))):::boundary
         
         CLI -.->|Provisions & Manages| MDServer
-        MDServer --- WINE
+        WINE --- MDServer
     end
 
     Broker((Broker Servers)):::core
 
-    Client <==>|Zero-Trust REST API\nJSON / WebSockets| API
+    Client <==>|Zero-Trust REST| API
     MT5 <==>|TCP/IP| Broker
 
     class Client,Server boundary
-
 ```
 
 ---
