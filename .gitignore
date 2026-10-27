@@ -1,0 +1,43 @@
+# Credentials & Configuration
+.env
+.env.*
+!.env.example
+
+# Data & Databases
+data/*
+!data/.gitkeep
+*.sqlite3
+*.sqlite
+*.db
+
+# Logs
+*.log
+logs/
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing & Linting
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# MetaTrader 5 Compiled Binaries
+*.ex5
+
+# OS & Editor Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

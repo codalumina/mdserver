@@ -1,0 +1,522 @@
+#!/bin/bash
+# ==============================================================================
+# MDServer: Headless MT5 REST API Deployment Wrapper
+#
+# Copyright (c) 2024-2026 Iman Vahdat
+# Licensed under the MIT License.
+#
+# Repository: https://github.com/codalumina/mdserver.git
+# Description: OS detection, WINE 10 provisioning, Golden Image deployment, 
+#              and Systemd daemonization.
+# ==============================================================================
+
+set -e # Exit immediately if a command exits with a non-zero status
+
+# Configuration Variables
+ARCHIVE_URL="https://github.com/codalumina/mdserver/releases/download/v1.0.3-engine/mdserver_base_1.0.3.tar.gz"
+TARGET_DIR="$HOME/.mdserver"
+TEMP_ARCHIVE="/tmp/mdserver_base.tar.gz"
+REPO_URL="https://github.com/codalumina/mdserver.git"
+
+echo "================================================================"
+echo "🚀 MDServer Management Tool"
+echo "================================================================"
+
+# ----------------------------------------------------------------------
+# 1. OS Detection
+# ----------------------------------------------------------------------
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS_NAME=$ID
+    OS_CODENAME=$VERSION_CODENAME
+    OS_VERSION_ID=$VERSION_ID
+    echo "✅ $OS_NAME-$OS_CODENAME-$OS_VERSION_ID Detected."
+else
+    echo "❌ Error: Cannot determine Linux distribution."
+    exit 1
+fi
+
+# ----------------------------------------------------------------------
+# 2. WINE 10 Verification & Provisioning
+# ----------------------------------------------------------------------
+verify_wine_version() {
+    if command -v wine >/dev/null 2>&1; then
+        WINE_VERSION_FULL=$(wine --version 2>/dev/null)
+        if [[ "$WINE_VERSION_FULL" == wine-10.* ]]; then
+            echo "✅ Verified: $WINE_VERSION_FULL is installed."
+            return 0
+        else
+            echo "⚠️ Warning: Incorrect WINE version detected ($WINE_VERSION_FULL)."
+            echo "MDServer's Golden Image strictly requires WINE 10.x."
+            return 1
+        fi
+    else
+        echo "⚠️ WINE is not installed on this system."
+        return 1
+    fi
+}
+
+install_wine_ubuntu_debian() {
+    echo ""
+    echo "This script can automatically install WINE 10 via the official WineHQ repository."
+    read -p "Would you like to proceed with the automatic installation? [Y/n]: " user_input
+    user_input=${user_input:-Y}
+
+    if [[ "$user_input" =~ ^[Yy]$ ]]; then
+        echo "🔧 Provisioning WINE 10 for $NAME ($OS_CODENAME)..."
+        
+        sudo dpkg --add-architecture i386
+        sudo mkdir -pm 755 /etc/apt/keyrings
+        wget -qO - https://dl.winehq.org/wine-builds/winehq.key | sudo gpg --dearmor -y -o /etc/apt/keyrings/winehq-archive.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/winehq-archive.gpg] https://dl.winehq.org/wine-builds/$OS_NAME/ $OS_CODENAME main" | sudo tee /etc/apt/sources.list.d/winehq-$OS_NAME.list > /dev/null
+        sudo apt update
+        
+        echo "  -> Pinning and installing Wine 10.0 for $OS_NAME $OS_CODENAME..."
+        sudo apt-get install -y --allow-downgrades \
+            winehq-stable=10.0.0.0~$OS_CODENAME-1 \
+            wine-stable=10.0.0.0~$OS_CODENAME-1 \
+            wine-stable-amd64=10.0.0.0~$OS_CODENAME-1 \
+            wine-stable-i386=10.0.0.0~$OS_CODENAME-1
+        
+        sudo apt-mark hold winehq-stable wine-stable wine-stable-amd64 wine-stable-i386
+        echo "✅ WINE 10 Installation & Version Lock Complete."
+    else
+        echo "❌ WINE 10 is required. Exiting deployment."
+        exit 1
+    fi
+}
+
+install_wine_fedora() {
+    echo ""
+    echo "This script can automatically install WINE 10 via the official WineHQ repository."
+    read -p "Would you like to proceed with the automatic installation? [Y/n]: " user_input
+    user_input=${user_input:-Y}
+
+    if [[ "$user_input" =~ ^[Yy]$ ]]; then
+        echo "🔧 Provisioning WINE 10 for Fedora ($OS_VERSION_ID)..."
+        
+        sudo dnf install dnf-plugins-core -y
+        sudo dnf config-manager --add-repo https://dl.winehq.org/wine-builds/fedora/$OS_VERSION_ID/winehq.repo
+        
+        echo "  -> Pinning and installing Wine 10.0 for Fedora $OS_VERSION_ID..."
+        sudo dnf install -y --allowerasing \
+            winehq-stable-10.0* \
+            wine-stable-10.0* \
+            wine-stable-amd64-10.0* \
+            wine-stable-i686-10.0*
+        
+        echo "🔒 Locking WINE version to prevent future update conflicts..."
+        sudo dnf install 'dnf-command(versionlock)' -y
+        # Clear any existing locks for wine before adding the new ones
+        sudo dnf versionlock delete winehq-stable wine-stable wine-stable-amd64 wine-stable-i686 2>/dev/null || true
+        sudo dnf versionlock add winehq-stable wine-stable wine-stable-amd64 wine-stable-i686
+        
+        echo "✅ WINE 10 Installation & Version Lock Complete."
+    else
+        echo "❌ WINE 10 is required. Exiting deployment."
+        exit 1
+    fi
+}
+
+pause_for_other_distros() {
+    echo ""
+    echo "🛑 Manual WINE 10 Installation Required"
+    echo "MDServer detected $NAME. Automatic installation is only supported for Ubuntu, Debian, and Fedora."
+    echo "Please open a new terminal and install WINE 10 using your package manager."
+    
+    if [[ "$OS_NAME" == "arch" || "$OS_NAME" == "manjaro" ]]; then
+        echo "Command: sudo pacman -S wine"
+    else
+        echo "Please refer to https://wiki.winehq.org/Download for $NAME instructions."
+    fi
+    
+    echo ""
+    read -p "Press [ENTER] once you have successfully installed WINE 10 to continue..."
+}
+
+cmd_install() {
+    # ----------------------------------------------------------------------
+    # 3. Execution Pipeline (Phase 1: Validation)
+    # ----------------------------------------------------------------------
+    echo "🔍 Checking system dependencies..."
+
+    if ! command -v xvfb-run >/dev/null 2>&1 || ! command -v x11vnc >/dev/null 2>&1; then
+        echo "🔧 Installing Xvfb and x11vnc for interactive setup and background daemonization..."
+        if [[ "$OS_NAME" == "ubuntu" || "$OS_NAME" == "debian" ]]; then
+            sudo apt-get update -qq && sudo apt-get install -y xvfb x11vnc
+        elif [[ "$OS_NAME" == "fedora" ]]; then
+            sudo dnf install -y xorg-x11-server-Xvfb x11vnc
+        else
+            echo "⚠️ Please install xvfb manually using your package manager."
+        fi
+    fi
+
+    echo "🔍 Checking WINE dependencies..."
+
+    if ! verify_wine_version; then
+        if [[ "$OS_NAME" == "ubuntu" || "$OS_NAME" == "debian" ]]; then
+            install_wine_ubuntu_debian
+        elif [[ "$OS_NAME" == "fedora" ]]; then
+            install_wine_fedora
+        else
+            pause_for_other_distros
+        fi
+        
+        if ! verify_wine_version; then
+            echo "❌ Error: Failed to detect WINE 10 after installation attempt."
+            echo "Please install WINE 10 manually and re-run this script."
+            exit 1
+        fi
+    fi
+    echo "✅ Environment validation passed."
+    echo ""
+
+    # ----------------------------------------------------------------------
+    # 4. Phase 2: Pre-Check, Cleanup & Archive Retrieval
+    # ----------------------------------------------------------------------
+    if [ -d "$TARGET_DIR" ]; then
+        echo "⚠️ WARNING: An existing MDServer installation was detected at $TARGET_DIR."
+        echo "Proceeding will completely wipe the existing WINE container, application code, and your .env credentials."
+        read -p "Are you sure you want to delete this installation and start fresh? [y/N]: " wipe_confirm
+        if [[ ! "$wipe_confirm" =~ ^[Yy]$ ]]; then
+            echo "❌ Installation aborted by user."
+            exit 1
+        fi
+        
+        echo "🧹 Performing fresh installation cleanup..."
+        # 1. Stop and remove existing systemd service
+        sudo systemctl stop mdserver 2>/dev/null || true
+        sudo systemctl disable mdserver 2>/dev/null || true
+        sudo rm -f /etc/systemd/system/mdserver.service
+        sudo systemctl daemon-reload
+
+        # 2. Aggressive process cleanup
+        WINEPREFIX="$TARGET_DIR" wineserver -k 2>/dev/null || true
+        sudo killall -9 Xvfb x11vnc wine wineserver winedevice.exe python python3 2>/dev/null || true
+        sudo rm -f /tmp/.X11-unix/X* 2>/dev/null || true
+
+        # 3. Wipe the application prefix
+        rm -rf "$TARGET_DIR"
+    fi
+    mkdir -p "$TARGET_DIR"
+    rm -f "$TEMP_ARCHIVE" # Clear any stalled downloads
+
+    echo "📦 Fetching MDServer Golden Image..."
+    wget --show-progress -O "$TEMP_ARCHIVE" "$ARCHIVE_URL" || {
+        echo "❌ Error: Failed to download the Golden Image."
+        echo "Please check your network connection or the distribution URL."
+        exit 1
+    }
+
+    echo "📂 Extracting Golden Image (this may take a minute)..."
+    # Print a dot for every 20,000 blocks (roughly every 10MB extracted)
+    tar -xzf "$TEMP_ARCHIVE" -C "$TARGET_DIR" --checkpoint=20000 --checkpoint-action=dot
+    echo "" # Ensure the next terminal output starts on a new line
+
+    echo "🧹 Cleaning up temporary archive..."
+    rm -f "$TEMP_ARCHIVE"
+
+    echo "✅ MDServer environment successfully provisioned at $TARGET_DIR"
+    echo "⏳ [Next Phase: Systemd Daemonization will go here]"
+
+    # ----------------------------------------------------------------------
+    # 5. Phase 3: Application Code & Configuration (.env)
+    # ----------------------------------------------------------------------
+    APP_DIR="$TARGET_DIR/app"
+    mkdir -p "$APP_DIR"
+
+    echo "================================================================"
+    echo "⚙️ Phase 3: Application Configuration"
+    echo "================================================================"
+    echo "The core MDServer WINE environment is strictly provisioned."
+    echo "To complete the deployment, follow these steps:"
+    echo ""
+    echo "1. Deploying Application Code..."
+    if [ -d "$APP_DIR/.git" ]; then
+        echo "   -> Repository already exists at $APP_DIR. Pulling latest..."
+        git -C "$APP_DIR" pull
+    else
+        echo "   -> Cloning repository from $REPO_URL..."
+        # Note: During private testing, GitHub will prompt for your Username and Personal Access Token here.
+        git clone "$REPO_URL" "$APP_DIR"
+    fi
+    echo ""
+    echo "2. Configure Credentials:"
+    if [ ! -f "$APP_DIR/.env" ] && [ -f "$APP_DIR/.env.example" ]; then
+        cp "$APP_DIR/.env.example" "$APP_DIR/.env"
+        echo "   -> Generated .env from template."
+    fi
+    echo "   Please edit your environment file to add your broker details:"
+    echo "   nano $APP_DIR/.env"
+    echo "   ⚠️ CRITICAL: Ensure MT5_SERVER matches your broker's name EXACTLY (case-sensitive)."
+    echo "   Do not duplicate variable names (e.g., MT5_SERVER=MT5_SERVER=...)."
+    echo ""
+    echo "3. Generate Security Token:"
+    echo "   Generate your master API key by running:"
+    echo "   mdserver key create \"Admin\""
+    echo ""
+
+    # ----------------------------------------------------------------------
+    # Phase 3.5: Interactive Broker Setup
+    # ----------------------------------------------------------------------
+    clear
+    echo "================================================================"
+    echo "🖥️  ACTION REQUIRED: ONE-TIME BROKER SETUP (VNC)"
+    echo "================================================================"
+    echo "Because this is a pristine MT5 installation, it does not yet know"
+    echo "your broker's specific network topology. You must log in visually"
+    echo "just once to cache the connection."
+    echo ""
+    
+    # Clean up any orphaned VNC/Xvfb processes
+    killall -9 x11vnc Xvfb 2>/dev/null || true
+    rm -f /tmp/.X11-unix/X* 2>/dev/null || true
+    
+    # Start Xvfb independently
+    Xvfb :99 -screen 0 1024x768x24 >/dev/null 2>&1 &
+    XVFB_PID=$!
+    sleep 3
+    
+    # Export display and launch MT5
+    export DISPLAY=:99
+    WINEPREFIX="$TARGET_DIR" wine "C:\Program Files\MetaTrader 5\terminal64.exe" >/dev/null 2>&1 &
+    
+    # Start VNC server (with -forever to prevent macOS disconnects)
+    x11vnc -display :99 -bg -passwd setup -xkb -forever -quiet || {
+        echo "❌ Error: Failed to start VNC server. Port 5900 may be locked."
+        kill $XVFB_PID 2>/dev/null || true
+        exit 1
+    }
+
+    echo "📡 VNC Server is LIVE."
+    echo "----------------------------------------------------------------"
+    echo "Connection Instructions (Password: setup):"
+    echo "  - Local Install: Connect your VNC client to '127.0.0.1:5900'."
+    echo "  - VPS Install: Connect to '<VPS_IP>:5900'."
+    echo "    * macOS: Open Safari -> type 'vnc://<VPS_IP>:5900' -> Enter."
+    echo "    * Windows/Linux: Use RealVNC or Remmina."
+    echo "----------------------------------------------------------------"
+    echo "Inside the MT5 screen:"
+    echo "  1. ⚠️ IF AN UPDATE POPUP APPEARS, CLICK 'LATER' OR 'CANCEL'."
+    echo "     DO NOT UPDATE. Updating will break the locked environment."
+    echo "  2. Search for your exact broker and select it."
+    echo "  3. Enter your credentials and check 'Save password'."
+    echo "  4. Go to 'Tools' -> 'Options' -> 'Expert Advisors' and check 'Allow algorithmic trading'."
+    echo "  5. Wait until you hear the chime and see live data ticking."
+    echo ""
+    read -p "Press [ENTER] ONLY AFTER you have successfully logged in..."
+
+    echo "🧹 Cleaning up visual setup environment..."
+    killall -9 x11vnc Xvfb 2>/dev/null || true
+    WINEPREFIX="$TARGET_DIR" wineserver -k 2>/dev/null || true
+    unset DISPLAY
+    echo "✅ Broker topology cached successfully."
+    echo ""
+
+    # ----------------------------------------------------------------------
+    # 6. Phase 4: Systemd Daemonization
+    # ----------------------------------------------------------------------
+    echo "================================================================"
+    echo "🛡️ Phase 4: Systemd Provisioning"
+    echo "================================================================"
+    SERVICE_FILE="/tmp/mdserver.service"
+
+    cat <<EOF > "$SERVICE_FILE"
+[Unit]
+Description=MDServer FastAPI MT5 Engine
+After=network.target
+
+[Service]
+User=$USER
+Group=$USER
+WorkingDirectory=$APP_DIR
+Environment="WINEPREFIX=$TARGET_DIR"
+Environment="WINEDEBUG=-all"
+
+# Execution strictly routed through a virtual framebuffer for 100% headless reliability
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1024x768x24" /usr/bin/wine python main.py
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Automatically install the service file
+    sudo mv "$SERVICE_FILE" /etc/systemd/system/
+    sudo systemctl daemon-reload
+
+    echo "================================================================"
+    echo "✅ MDServer Engine Provisioned Successfully!"
+    echo "================================================================"
+    echo "To bring your API online, complete these final 3 steps:"
+    echo ""
+    echo "1. Configure your MT5 broker credentials:"
+    echo "   nano $APP_DIR/.env"
+    echo ""
+    echo "2. Generate your master API key (Save this!):"
+    echo "   mdserver key create \"Admin\""
+    echo ""
+    echo "3. Start the background daemon:"
+    echo "   sudo systemctl enable mdserver --now"
+    echo "================================================================"
+}
+
+
+cmd_update() {
+    echo "🔄 Updating MDServer Application..."
+    APP_DIR="$TARGET_DIR/app"
+    if [ -d "$APP_DIR/.git" ]; then
+        # 1. Pull the latest repository
+        git -C "$APP_DIR" pull
+        
+        # 2. Self-Update the global CLI script
+        if [ -f "$APP_DIR/mdserver" ]; then
+            echo "🔄 Updating global mdserver CLI tool..."
+            sudo cp "$APP_DIR/mdserver" /usr/local/bin/mdserver
+            sudo chmod +x /usr/local/bin/mdserver
+        fi
+
+        # 3. Update dependencies and restart
+        echo "📦 Updating Python dependencies..."
+        WINEPREFIX="$TARGET_DIR" wine python -m pip install -r "$APP_DIR/requirements.txt" 2>/dev/null || true
+        echo "♻️ Restarting Systemd service..."
+        sudo systemctl restart mdserver
+        echo "✅ Update complete."
+    else
+        echo "❌ Error: Application directory not found at $APP_DIR. Run 'mdserver install' first."
+        exit 1
+    fi
+}
+
+cmd_status() {
+    echo "📊 MDServer Status"
+    echo "----------------------------------------------------------------"
+    sudo systemctl status mdserver --no-pager | grep -E "Active:|Main PID:"
+    echo "----------------------------------------------------------------"
+    echo "Active Processes:"
+    pgrep -a -f "wine|wineserver|terminal64.exe" | grep -v "xvfb-run" | while read -r pid cmd; do echo "  -> PID: $pid | $cmd"; done || echo "  No active WINE processes found."
+}
+
+cmd_view() {
+    echo "👁️  Attaching VNC to active MDServer display..."
+    
+    # Grab the exact command line of the running Xvfb process
+    XVFB_PROC=$(pgrep -a Xvfb | head -n 1)
+    
+    DISP=$(echo "$XVFB_PROC" | grep -o ':[0-9]\+' | head -n 1)
+    if [ -z "$DISP" ]; then
+        echo "❌ Error: Could not find an active Xvfb display. Is mdserver running?"
+        exit 1
+    fi
+
+    # Dynamically extract the randomized Xauthority path
+    XAUTH=$(echo "$XVFB_PROC" | grep -o '\-auth [^ ]*' | awk '{print $2}')
+    AUTH_FLAG=""
+    if [ -n "$XAUTH" ]; then
+        AUTH_FLAG="-auth $XAUTH"
+    else
+        AUTH_FLAG="-auth guess"
+    fi
+
+    echo "✅ VNC Server active on display $DISP (Port 5900/5901). Password: view"
+    echo "Press CTRL+C in this terminal to close the viewer (MT5 will keep running in the background)."
+    
+    # Launch x11vnc with the extracted security cookie
+    x11vnc -display "$DISP" $AUTH_FLAG -passwd view -xkb -forever -quiet
+}
+
+cmd_version() {
+    echo "MDServer Engine (Golden Image): 1.0.3"
+    if [ -d "$TARGET_DIR/app/.git" ]; then
+        APP_VER=$(git -C "$TARGET_DIR/app" rev-parse --short HEAD)
+        echo "MDServer Application (Git): $APP_VER"
+    else
+        echo "MDServer Application (Git): Not installed"
+    fi
+}
+
+cmd_key() {
+    APP_DIR="$TARGET_DIR/app"
+    if [ ! -f "$APP_DIR/cli.py" ]; then
+        echo "❌ Error: Application CLI not found at $APP_DIR/cli.py. Run 'mdserver install' first."
+        exit 1
+    fi
+    
+    ACTION="$1"
+    PARAM="$2"
+    
+    case "$ACTION" in
+        create)
+            if [ -z "$PARAM" ]; then
+                echo "Usage: mdserver key create \"Client_Name\""
+                exit 1
+            fi
+            WINEPREFIX="$TARGET_DIR" WINEDEBUG=-all wine python "$APP_DIR/cli.py" create-key --client "$PARAM"
+            ;;
+        list)
+            WINEPREFIX="$TARGET_DIR" WINEDEBUG=-all wine python "$APP_DIR/cli.py" list-keys
+            ;;
+        revoke)
+            if [ -z "$PARAM" ]; then
+                echo "Usage: mdserver key revoke <Key_ID>"
+                exit 1
+            fi
+            WINEPREFIX="$TARGET_DIR" WINEDEBUG=-all wine python "$APP_DIR/cli.py" revoke-key --id "$PARAM"
+            ;;
+        *)
+            echo "Usage: mdserver key {create|list|revoke} [arguments]"
+            echo "  create \"Name\"  - Generate a new API key"
+            echo "  list           - List active keys and IDs"
+            echo "  revoke <ID>    - Revoke a specific key by ID"
+            exit 1
+            ;;
+    esac
+}
+
+# ----------------------------------------------------------------------
+# CLI Router
+# ----------------------------------------------------------------------
+case "$1" in
+    install)
+        cmd_install
+        ;;
+    update)
+        cmd_update
+        ;;
+    start)
+        cmd_start
+        ;;
+    stop)
+        cmd_stop
+        ;;
+    status)
+        cmd_status
+        ;;
+    version)
+        cmd_version
+        ;;
+    view)
+        cmd_view
+        ;;
+    key)
+        cmd_key "$2" "$3"
+        ;;
+    *)
+        echo "Usage: mdserver {install|update|start|stop|status|version|key}"
+        echo "  install  - Provision the WINE engine and application"
+        echo "  update   - Pull latest application code and restart daemon"
+        echo "  start    - Start the background server daemon"
+        echo "  stop     - Stop the background server daemon"
+        echo "  status   - View daemon uptime and WINE memory state"
+        echo "  view     - Attach a VNC viewer to the running background terminal"
+        echo "  version  - Display engine and application versions"
+        echo "  key      - Manage Zero-Trust API keys (create, list, revoke)"
+        exit 1
+        ;;
+esac
+
+
+

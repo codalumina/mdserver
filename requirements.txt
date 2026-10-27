@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+MetaTrader5
+pydantic
+pydantic-settings
+cachetools
+python-dotenv
+tzdata
+numpy==1.24.3
