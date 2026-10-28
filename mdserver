@@ -273,7 +273,7 @@ cmd_install() {
     rm -f /tmp/.X11-unix/X* 2>/dev/null || true
     
     # Start Xvfb independently
-    Xvfb :99 -screen 0 1024x768x24 >/dev/null 2>&1 &
+    Xvfb :99 -screen 0 1024x768x24 -ac >/dev/null 2>&1 &
     XVFB_PID=$!
     sleep 3
     
@@ -282,7 +282,7 @@ cmd_install() {
     WINEPREFIX="$TARGET_DIR" wine "C:\Program Files\MetaTrader 5\terminal64.exe" >/dev/null 2>&1 &
     
     # Start VNC server (with -forever to prevent macOS disconnects)
-    x11vnc -display :99 -bg -passwd setup -xkb -forever -quiet || {
+    x11vnc -display :99 -bg -nopw -auth /dev/null -passwd setup -xkb -forever -quiet || {
         echo "❌ Error: Failed to start VNC server. Port 5900 may be locked."
         kill $XVFB_PID 2>/dev/null || true
         exit 1
@@ -319,12 +319,28 @@ cmd_install() {
     echo "================================================================"
     echo "🛡️ Phase 4: Systemd Provisioning"
     echo "================================================================"
+    XVFB_SERVICE_FILE="/tmp/mdserver-xvfb.service"
     SERVICE_FILE="/tmp/mdserver.service"
+
+    cat <<EOF > "$XVFB_SERVICE_FILE"
+[Unit]
+Description=MDServer Virtual Framebuffer
+After=network.target
+
+[Service]
+User=$USER
+ExecStart=/usr/bin/Xvfb :100 -screen 0 1024x768x24 -ac
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
 
     cat <<EOF > "$SERVICE_FILE"
 [Unit]
 Description=MDServer FastAPI MT5 Engine
-After=network.target
+Requires=mdserver-xvfb.service
+After=mdserver-xvfb.service network.target
 
 [Service]
 User=$USER
@@ -332,21 +348,25 @@ Group=$USER
 WorkingDirectory=$APP_DIR
 Environment="WINEPREFIX=$TARGET_DIR"
 Environment="WINEDEBUG=-all"
+Environment="DISPLAY=:100"
 
-# Execution strictly routed through a virtual framebuffer for 100% headless reliability
-ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1024x768x24" /usr/bin/wine python main.py
+ExecStart=/usr/bin/wine python main.py
+ExecStop=/usr/bin/wineserver -w
+SuccessExitStatus=1
 
 Restart=always
 RestartSec=5
-TimeoutStopSec=20
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    # Automatically install the service file
+    # Automatically install both service files
+    sudo mv "$XVFB_SERVICE_FILE" /etc/systemd/system/
     sudo mv "$SERVICE_FILE" /etc/systemd/system/
     sudo systemctl daemon-reload
+    sudo systemctl enable mdserver-xvfb --now
 
     echo "================================================================"
     echo "✅ MDServer Engine Provisioned Successfully!"
@@ -375,15 +395,70 @@ cmd_update() {
         # 2. Self-Update the global CLI script
         if [ -f "$APP_DIR/mdserver" ]; then
             echo "🔄 Updating global mdserver CLI tool..."
-            sudo cp "$APP_DIR/mdserver" /usr/local/bin/mdserver
+            sudo cp "$APP_DIR/mdserver" /usr/local/bin/mdserver.tmp
+            sudo mv /usr/local/bin/mdserver.tmp /usr/local/bin/mdserver
             sudo chmod +x /usr/local/bin/mdserver
         fi
 
-        # 3. Update dependencies and restart
+        # 3. Update dependencies
         echo "📦 Updating Python dependencies..."
         WINEPREFIX="$TARGET_DIR" wine python -m pip install -r "$APP_DIR/requirements.txt" 2>/dev/null || true
+        
+        # 4. Re-provision Systemd (Migrate to dual-service architecture)
+        echo "🛡️ Upgrading Systemd services..."
+        sudo systemctl stop mdserver 2>/dev/null || true
+        sudo killall -9 xvfb-run 2>/dev/null || true
+
+        XVFB_SERVICE_FILE="/tmp/mdserver-xvfb.service"
+        SERVICE_FILE="/tmp/mdserver.service"
+
+        cat <<EOF > "$XVFB_SERVICE_FILE"
+[Unit]
+Description=MDServer Virtual Framebuffer
+After=network.target
+
+[Service]
+User=$USER
+ExecStart=/usr/bin/Xvfb :100 -screen 0 1024x768x24 -ac
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        cat <<EOF > "$SERVICE_FILE"
+[Unit]
+Description=MDServer FastAPI MT5 Engine
+Requires=mdserver-xvfb.service
+After=mdserver-xvfb.service network.target
+
+[Service]
+User=$USER
+Group=$USER
+WorkingDirectory=$APP_DIR
+Environment="WINEPREFIX=$TARGET_DIR"
+Environment="WINEDEBUG=-all"
+Environment="DISPLAY=:100"
+
+ExecStart=/usr/bin/wine python main.py
+ExecStop=/usr/bin/wineserver -w
+SuccessExitStatus=1
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        sudo mv "$XVFB_SERVICE_FILE" /etc/systemd/system/
+        sudo mv "$SERVICE_FILE" /etc/systemd/system/
+        sudo systemctl daemon-reload
+        sudo systemctl enable mdserver-xvfb --now
+
         echo "♻️ Restarting Systemd service..."
-        sudo systemctl restart mdserver
+        sudo systemctl start mdserver
         echo "✅ Update complete."
     else
         echo "❌ Error: Application directory not found at $APP_DIR. Run 'mdserver install' first."
@@ -391,10 +466,30 @@ cmd_update() {
     fi
 }
 
+cmd_start() {
+    echo "🟢 Starting MDServer daemon..."
+    sudo systemctl start mdserver-xvfb 2>/dev/null || true
+    sudo systemctl start mdserver
+    echo "✅ Started."
+}
+
+cmd_stop() {
+    echo "🛑 Stopping MDServer daemon..."
+    sudo systemctl stop mdserver 2>/dev/null || true
+    sudo systemctl stop mdserver-xvfb 2>/dev/null || true
+    echo "✅ Stopped."
+}
+
+cmd_restart() {
+    echo "♻️ Restarting MDServer daemon and clearing MT5 memory state..."
+    sudo systemctl restart mdserver
+    echo "✅ Restart complete."
+}
+
 cmd_status() {
     echo "📊 MDServer Status"
     echo "----------------------------------------------------------------"
-    sudo systemctl status mdserver --no-pager | grep -E "Active:|Main PID:"
+    sudo systemctl status mdserver-xvfb mdserver --no-pager 2>/dev/null | grep -E "mdserver|Active:|Main PID:" || true
     echo "----------------------------------------------------------------"
     echo "Active Processes:"
     pgrep -a -f "wine|wineserver|terminal64.exe" | grep -v "xvfb-run" | while read -r pid cmd; do echo "  -> PID: $pid | $cmd"; done || echo "  No active WINE processes found."
@@ -412,20 +507,11 @@ cmd_view() {
         exit 1
     fi
 
-    # Dynamically extract the randomized Xauthority path
-    XAUTH=$(echo "$XVFB_PROC" | grep -o '\-auth [^ ]*' | awk '{print $2}')
-    AUTH_FLAG=""
-    if [ -n "$XAUTH" ]; then
-        AUTH_FLAG="-auth $XAUTH"
-    else
-        AUTH_FLAG="-auth guess"
-    fi
-
     echo "✅ VNC Server active on display $DISP (Port 5900/5901). Password: view"
     echo "Press CTRL+C in this terminal to close the viewer (MT5 will keep running in the background)."
     
-    # Launch x11vnc with the extracted security cookie
-    x11vnc -display "$DISP" $AUTH_FLAG -passwd view -xkb -forever -quiet
+    # Launch x11vnc bypassing all authorization checks since Xvfb runs natively with -ac
+    x11vnc -display "$DISP" -nopw -auth /dev/null -passwd view -xkb -forever -quiet
 }
 
 cmd_version() {
@@ -489,6 +575,9 @@ case "$1" in
     start)
         cmd_start
         ;;
+    restart)
+        cmd_restart
+        ;;
     stop)
         cmd_stop
         ;;
@@ -505,11 +594,12 @@ case "$1" in
         cmd_key "$2" "$3"
         ;;
     *)
-        echo "Usage: mdserver {install|update|start|stop|status|version|key}"
+        echo "Usage: mdserver {install|update|start|stop|restart|status|version|key}"
         echo "  install  - Provision the WINE engine and application"
         echo "  update   - Pull latest application code and restart daemon"
         echo "  start    - Start the background server daemon"
         echo "  stop     - Stop the background server daemon"
+        echo "  restart  - Restart the daemon and cleanly flush terminal state"
         echo "  status   - View daemon uptime and WINE memory state"
         echo "  view     - Attach a VNC viewer to the running background terminal"
         echo "  version  - Display engine and application versions"
