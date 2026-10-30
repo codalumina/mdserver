@@ -1,15 +1,16 @@
 """
 Data Validation and Serialization Schemas.
 
-This module defines the Pydantic models used across the API to strictly enforce 
-JSON request/response contracts. These schemas ensure that all C++ MetaTrader 5 
-data structures are safely serialized for frontend consumption and automatically 
+This module defines the Pydantic models used across the API to strictly enforce
+JSON request/response contracts. These schemas ensure that all C++ MetaTrader 5
+data structures are safely serialized for frontend consumption and automatically
 generate the interactive OpenAPI/Swagger documentation.
 """
 
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
+
 
 class OHLCV(BaseModel):
     time: int
@@ -20,7 +21,8 @@ class OHLCV(BaseModel):
     close: float
     tick_volume: int
     real_volume: int  # Added for future exchange volume support
-    spread: int       # Added to catch the full MT5 array output
+    spread: int  # Added to catch the full MT5 array output
+
 
 class PriceActionResponse(BaseModel):
     symbol: str
@@ -28,6 +30,7 @@ class PriceActionResponse(BaseModel):
     count: int
     price_action: List[OHLCV]
     timestamp: str
+
 
 class Tick(BaseModel):
     time: int
@@ -40,11 +43,13 @@ class Tick(BaseModel):
     flags: int
     volume_real: float
 
+
 class TickDataResponse(BaseModel):
     symbol: str
     count: int
     ticks: List[Tick]
     timestamp: str
+
 
 class BookEntry(BaseModel):
     type: int
@@ -52,11 +57,13 @@ class BookEntry(BaseModel):
     volume: int
     volume_real: float
 
+
 class OrderBookResponse(BaseModel):
     symbol: str
     bids: List[BookEntry]
     asks: List[BookEntry]
     timestamp: str
+
 
 class Position(BaseModel):
     ticket: int
@@ -81,10 +88,12 @@ class Position(BaseModel):
     nominal_value: float
     margin: float
 
+
 class OpenPositionsResponse(BaseModel):
     count: int
     positions: List[Position]
     timestamp: str
+
 
 class ActiveOrder(BaseModel):
     ticket: int
@@ -100,13 +109,16 @@ class ActiveOrder(BaseModel):
     symbol: str
     comment: str
 
+
 class ActiveOrdersResponse(BaseModel):
     count: int
     orders: List[ActiveOrder]
     timestamp: str
 
+
 class CancelOrderRequest(BaseModel):
     ticket: int
+
 
 class TradeDeal(BaseModel):
     ticket: int
@@ -128,12 +140,14 @@ class TradeDeal(BaseModel):
     comment: str
     external_id: str
 
+
 class TradeHistoryResponse(BaseModel):
     count: int
     net_pnl: float
     total_commission: float
     deals: List[TradeDeal]
     timestamp: str
+
 
 class ExecuteTradeRequest(BaseModel):
     symbol: str
@@ -144,6 +158,7 @@ class ExecuteTradeRequest(BaseModel):
     take_profit: Optional[float] = 0.0
     client_timestamp: Optional[str] = None
 
+
 class SimulateTradeRequest(BaseModel):
     symbol: str
     volume: float
@@ -151,21 +166,25 @@ class SimulateTradeRequest(BaseModel):
     price_open: float
     price_close: float
 
+
 class TradeSimulationResponse(BaseModel):
     status: str
     margin_required: Optional[float]
     expected_profit: Optional[float]
     timestamp: str
 
+
 class ClosePositionRequest(BaseModel):
     ticket: int
     client_timestamp: Optional[str] = None
+
 
 class TradeExecutionResponse(BaseModel):
     status: str
     ticket: Optional[int] = None
     details: Dict[str, Any]
     timestamp: str
+
 
 class SymbolInfo(BaseModel):
     name: str
@@ -180,11 +199,15 @@ class SymbolInfo(BaseModel):
     trade_contract_size: Optional[float] = None
     asset_class: str = Field(alias="class", default="Unknown")
     group: str = "Unknown"
+    trade_tick_size: float | None = None
+    trade_tick_value: float | None = None
+
 
 class AllSymbolsResponse(BaseModel):
     count: int
     symbols: List[SymbolInfo]
     timestamp: str
+
 
 class CalendarEvent(BaseModel):
     time: int
@@ -198,20 +221,24 @@ class CalendarEvent(BaseModel):
     forecast: Optional[float] = None
     previous: Optional[float] = None
 
+
 class CalendarResponse(BaseModel):
     count: int
     events: List[CalendarEvent]
     timestamp: str
+
 
 class Mover(BaseModel):
     symbol: str
     open: float
     close: float
 
+
 class MarketMoversResponse(BaseModel):
     status: str
     movers: List[Mover]
-    timestamp: str  
+    timestamp: str
+
 
 class BulkPriceActionResponse(BaseModel):
     count_requested: int
@@ -219,6 +246,7 @@ class BulkPriceActionResponse(BaseModel):
     timeframes: List[str]
     data: Dict[str, Dict[str, List[OHLCV]]]
     timestamp: str
+
 
 class MT5Stats(BaseModel):
     connected: bool
@@ -239,6 +267,7 @@ class MT5Stats(BaseModel):
     open_positions_count: int
     pending_orders_count: int
 
+
 class OSStats(BaseModel):
     python_architecture: str
     wine_version: str
@@ -253,6 +282,7 @@ class OSStats(BaseModel):
     disk_total_gb: Union[float, str] = "N/A"
     disk_free_gb: Union[float, str] = "N/A"
     linux_read_error: str = "N/A"
+
 
 class ServerStatResponse(BaseModel):
     status: str
